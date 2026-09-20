@@ -151,7 +151,7 @@ def inject() -> None:
 def band(subtitle: str) -> None:
     st.markdown(
         f'<div class="vd-band">{TRAY_MARK}'
-        f'<div><div class="vd-title">Vừa Đủ</div>'
+        f'<div><div class="vd-title">SaveAByte</div>'
         f'<div class="vd-sub">{subtitle}</div></div></div>',
         unsafe_allow_html=True,
     )
