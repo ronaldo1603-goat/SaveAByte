@@ -18,22 +18,22 @@ School kitchens cook the same portions week after week with no feedback on what 
 
 ```
 saveabyte/
-├── app.py                  # Page 1: Tray scan (before / after meal)
+├── app.py                  
 ├── pages/
-│   ├── 2_Tap_Counter.py    # Extra-portion counter at the serving station
-│   ├── 3_Dashboard.py      # Per-dish waste ratio + portion recommendations
-│   └── 4_Calibration.py    # Upload ground-truth CSV, fit & save correction
+│   ├── 2_Tap_Counter.py    
+│   ├── 3_Dashboard.py      
+│   └── 4_Calibration.py    
 ├── src/
 │   └── nexus/
-│       ├── gemini.py       # Gemini Flash call → structured JSON
-│       ├── models.py       # Pydantic models: Compartment, TrayAnalysis
-│       ├── db.py           # Supabase client, image upload, inserts, paginated fetch
-│       ├── dashboard.py    # Aggregation, waste_ratio, recommendation logic
-│       └── style.py        # Shared UI styling
-├── phase2.py               # Archived FastAPI version (kept for reference)
+│       ├── gemini.py       
+│       ├── models.py       
+│       ├── db.py           
+│       ├── dashboard.py    
+│       └── style.py        
+├── phase2.py               
 ├── pyproject.toml
 ├── uv.lock
-└── .gitignore              # .env and .streamlit/secrets.toml are excluded
+└── .gitignore      
 ```
 
 ## Limitations & next steps
