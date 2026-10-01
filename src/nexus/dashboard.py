@@ -1,14 +1,18 @@
-# src/dashboard.py
+# src/nexus/dashboard.py
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from src.nexus import style
-from src.nexus.db import fetch_logs, fetch_taps, latest_calibration, signed_url
+from src.nexus.db import (fetch_logs, fetch_menus, fetch_scans, fetch_servings,
+                          fetch_taps, latest_calibration, signed_url)
+from src.nexus.menu import normalize_dish
 
+# Ngưỡng tạm thời, áp lên tỉ lệ bỏ lại so với suất phát ra.
+# Cần hiệu chỉnh lại khi có dữ liệu thật.
 NGUONG_GIAM = 0.30
 NGUONG_TANG = 0.15
-TAP_CAO = 0.15 
+TAP_CAO = 0.15
 
 
 def tinh_khuyen_nghi(waste: float, tap_rate: float) -> tuple[str, str]:
@@ -21,85 +25,18 @@ def tinh_khuyen_nghi(waste: float, tap_rate: float) -> tuple[str, str]:
     return "Giữ nguyên", "Trong ngưỡng hợp lý"
 
 
-def build_dashboard(start_date: str, end_date: str) -> None:
-    logs = fetch_logs(start_date, end_date)
-    taps = fetch_taps(start_date, end_date)
-
-    if "phase" in logs.columns:
-        logs = logs[logs["phase"] == "after"].copy()
-
-    if logs.empty:
-        st.warning("Chưa có dữ liệu quét khay trong khoảng thời gian này.")
-        return
-
-    logs["dish_name"] = logs["dish_name"].str.strip().str.lower()
-    if not taps.empty:
-        taps["dish_name"] = taps["dish_name"].str.strip().str.lower()
-
-    if "inedible_ratio" not in logs.columns:
-        logs["inedible_ratio"] = 0.0
-    logs["edible_waste"] = logs["fill_fraction"] * (1 - logs["inedible_ratio"].fillna(0))
-
-    so_khay = logs["scan_id"].nunique()
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Số khay đã quét", so_khay)
-    c2.metric("Tỉ lệ thừa trung bình", f"{logs['edible_waste'].mean():.0%}")
-    c3.metric("Lượt xin thêm", len(taps))
-
-    st.divider()
-
-    per_dish = (
-        logs.groupby("dish_name")
-        .agg(thua_tb=("edible_waste", "mean"), so_lan=("edible_waste", "size"))
-        .reset_index()
-    )
-
-    if taps.empty:
-        per_dish["xin_them"] = 0
-    else:
-        tap_count = taps.groupby("dish_name").size().rename("xin_them")
-        per_dish = per_dish.merge(tap_count, on="dish_name", how="left")
-        per_dish["xin_them"] = per_dish["xin_them"].fillna(0).astype(int)
-
-    per_dish["tap_rate"] = per_dish["xin_them"] / so_khay
-
-    ket_qua = per_dish.apply(
-        lambda r: tinh_khuyen_nghi(r["thua_tb"], r["tap_rate"]), axis=1
-    )
-    per_dish["khuyen_nghi"] = [k for k, _ in ket_qua]
-    per_dish["ly_do"] = [l for _, l in ket_qua]
-
-    per_dish = per_dish.sort_values("thua_tb", ascending=False)
-    per_dish["thua_pct"] = per_dish["thua_tb"] * 100
-
-    st.subheader("Khuyến nghị điều chỉnh định lượng")
-    st.dataframe(
-        per_dish[["dish_name", "thua_pct", "xin_them", "khuyen_nghi", "ly_do"]],
-        column_config={
-            "dish_name": "Món",
-            "thua_pct": st.column_config.ProgressColumn(
-                "Tỉ lệ thừa", min_value=0.0, max_value=100.0, format="%.0f%%"
-            ),
-            "xin_them": "Lượt xin thêm",
-            "khuyen_nghi": "Khuyến nghị",
-            "ly_do": "Căn cứ",
-        },
-        hide_index=True,
-        use_container_width=True,
-    )
-
-    st.caption(
-        f"Dựa trên {so_khay} khay. Ngưỡng phân loại hiện là tạm thời, "
-        "cần hiệu chỉnh bằng đối chiếu với khay cân thực tế."
-    )
+# =====================================================================
+# Xử lý dữ liệu (calibration.py cũng dùng prepare và daily_table)
+# =====================================================================
 
 def prepare(logs: pd.DataFrame) -> pd.DataFrame:
     df = logs.copy()
     if df.empty:
-        return df
+        # Giữ đủ cột: ngày mà mọi khay đều ăn sạch vẫn phải tính được 0%
+        return pd.DataFrame(columns=["scan_id", "image_url", "dish_name", "fill_fraction",
+                                     "inedible_ratio", "meal_date", "phase", "edible_waste"])
 
-    df["dish_name"] = df["dish_name"].str.strip().str.lower()
+    df["dish_name"] = df["dish_name"].map(normalize_dish)
 
     if "inedible_ratio" not in df.columns:
         df["inedible_ratio"] = 0.0
@@ -111,25 +48,47 @@ def prepare(logs: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def daily_table(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or not (df["phase"] == "after").any():
+def _served(df: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
+    """(ngày, món) được phục vụ.
+    Ngày có thực đơn -> lấy đúng thực đơn ("khác" tự động bị loại).
+    Ngày cũ, trước khi có trang Menu -> suy từ món xuất hiện trong ảnh như trước."""
+    inferred = df[["meal_date", "dish_name"]].drop_duplicates()
+    if menus.empty:
+        return inferred
+    m = menus[["meal_date", "dish_name"]].drop_duplicates()
+    legacy = inferred[~inferred["meal_date"].isin(m["meal_date"])]
+    return pd.concat([m, legacy], ignore_index=True)
+
+
+def per_day_dish(df: pd.DataFrame, scans: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
+    """Mỗi (ngày, món) được phục vụ -> tổng thừa / số khay sau bữa hôm đó.
+    Món được phục vụ mà không có trên khay = ăn sạch (0)."""
+    if scans.empty:
+        return pd.DataFrame(columns=["meal_date", "dish_name", "waste_sum", "n_trays", "mean_after"])
+    n_trays = (scans[scans["phase"] == "after"]
+               .groupby("meal_date")["scan_id"].nunique()
+               .rename("n_trays").reset_index())
+    served = _served(df, menus)
+    sums = (df[df["phase"] == "after"]
+            .groupby(["meal_date", "dish_name"])["edible_waste"].sum()
+            .rename("waste_sum").reset_index())
+    out = (served.merge(sums, on=["meal_date", "dish_name"], how="left")
+                 .merge(n_trays, on="meal_date", how="inner"))
+    out["waste_sum"] = out["waste_sum"].fillna(0.0).astype(float)   # ngày ăn sạch hết: cột rỗng kiểu object
+    out["mean_after"] = out["waste_sum"] / out["n_trays"]
+    return out
+
+
+def daily_table(df: pd.DataFrame, scans: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
+    """Mỗi (ngày, món): thừa sau bữa, lượng phát ra trước bữa, và tỉ lệ bỏ lại = sau / trước."""
+    after = per_day_dish(df, scans, menus).rename(columns={"n_trays": "n_after"})
+    if after.empty:
         return pd.DataFrame()
 
-    g = (df.groupby(["meal_date", "dish_name", "phase"])["edible_waste"]
-           .agg(mean="mean", std="std", n="count")
-           .reset_index())
-
-    before = (g[g["phase"] == "before"]
-              .rename(columns={"mean": "mean_before",
-                               "std": "std_before",
-                               "n": "n_before"})
-              .drop(columns="phase"))
-
-    after = (g[g["phase"] == "after"]
-             .rename(columns={"mean": "mean_after",
-                              "std": "std_after",
-                              "n": "n_after"})
-             .drop(columns="phase"))
+    before = (df[df["phase"] == "before"]
+              .groupby(["meal_date", "dish_name"])["edible_waste"]
+              .agg(mean_before="mean", std_before="std", n_before="count")
+              .reset_index())
 
     wide = after.merge(before, on=["meal_date", "dish_name"], how="left")
 
@@ -139,19 +98,12 @@ def daily_table(df: pd.DataFrame) -> pd.DataFrame:
     wide["before_source"] = np.select(
         [measured, wide["mean_before"].notna()],
         ["measured", "imputed"],
-        default="missing",        
+        default="missing",
     )
 
     valid = wide["mean_before"] > 0
-
-    wide["waste_ratio"] = np.where(
-        valid, wide["mean_after"] / wide["mean_before"], np.nan
-    )
-    wide["portion_cv"] = np.where(
-        valid, wide["std_before"] / wide["mean_before"], np.nan
-    )
-
-    wide["flag"] = np.where(wide["waste_ratio"] > 1, "check", "")
+    wide["waste_ratio"] = np.where(valid, wide["mean_after"] / wide["mean_before"], np.nan)
+    wide["portion_cv"] = np.where(valid, wide["std_before"] / wide["mean_before"], np.nan)
 
     return wide.sort_values(["meal_date", "dish_name"]).reset_index(drop=True)
 
@@ -163,87 +115,177 @@ def _wmean(values: pd.Series, weights: pd.Series) -> float:
     return float((values[m] * weights[m]).sum() / weights[m].sum())
 
 
-def weekly_table(wide: pd.DataFrame) -> pd.DataFrame:
-    if wide.empty:
-        return pd.DataFrame()
-
-    out = []
-    for dish, g in wide.groupby("dish_name"):
-        out.append({
-            "dish_name":    dish,
-            "waste_ratio":  _wmean(g["waste_ratio"], g["n_after"]),
-            "portion_cv":   g["portion_cv"].mean(),
-            "n_days":       int(g["waste_ratio"].notna().sum()),
-            "n_trays":      int(g["n_after"].sum()),
-            "imputed_days": int((g["before_source"] == "imputed").sum()),
-        })
-
-    return (pd.DataFrame(out)
-            .sort_values("waste_ratio", ascending=False)
-            .reset_index(drop=True))
-
-
 def apply_calibration(ratio: pd.Series, cal: dict | None) -> pd.Series:
     if not cal:
         return ratio
     return (cal["slope"] * ratio + cal["intercept"]).clip(0, 1)
 
-def build_weekly(start_date: str, end_date: str) -> None:
-    df = prepare(fetch_logs(start_date, end_date))
-    daily = daily_table(df)
-    week = weekly_table(daily)
 
-    st.subheader("Tỉ lệ bỏ lại so với lượng phát ra")
+def _co_anh_truoc(daily: pd.DataFrame) -> pd.Series:
+    """True cho mọi dòng của món có ít nhất 1 ngày tính được tỉ lệ so với suất phát."""
+    return daily.groupby("dish_name")["waste_ratio"].transform(lambda s: s.notna().any())
 
-    if week.empty or week["waste_ratio"].isna().all():
-        style.empty("Chưa đủ dữ liệu để tính",
-                    "Cần cả ảnh khay trước bữa (chế độ “Trước bữa”) và khay sau bữa trong khoảng này.")
+
+def daily_value(daily: pd.DataFrame, cal: dict | None) -> pd.Series:
+    """CON SỐ DUY NHẤT hiển thị cho mỗi (ngày, món):
+    - có ảnh trước bữa -> tỉ lệ bỏ lại so với suất phát, đã hiệu chỉnh (nếu có hệ số)
+    - không có         -> phần còn lại so với sức chứa ngăn (chưa hiệu chỉnh được)"""
+    return pd.Series(
+        np.where(_co_anh_truoc(daily), apply_calibration(daily["waste_ratio"], cal), daily["mean_after"]),
+        index=daily.index,
+    )
+
+
+def dish_table(daily: pd.DataFrame, taps: pd.DataFrame,
+               servings: pd.DataFrame, cal: dict | None) -> pd.DataFrame:
+    """Một dòng mỗi món trong khoảng ngày, kèm khuyến nghị."""
+    if daily.empty:
+        return pd.DataFrame()
+
+    d = daily.copy()
+    d["thua"] = daily_value(d, cal)
+    d["co_anh_truoc"] = _co_anh_truoc(d)
+
+    # Mẫu số của tỉ lệ xin thêm = số suất bếp phát ra, KHÔNG phải số khay đã quét.
+    # Lượt xin thêm đến từ cả căng tin, còn khay chỉ quét một phần.
+    if servings.empty:
+        d["n_served"] = np.nan
+    else:
+        d = d.merge(servings[["meal_date", "n_served"]], on="meal_date", how="left")
+    # Chưa nhập số suất -> tạm dùng số khay. Nhập nhầm nhỏ hơn số khay đã quét -> lấy số khay.
+    d["mau_so"] = np.fmax(d["n_served"].astype(float), d["n_after"].astype(float))
+
+    # Chỉ đếm lượt xin thêm của đúng (ngày, món) có trong bảng, để tử và mẫu cùng phạm vi
+    if taps.empty:
+        d["xin_them"] = 0
+    else:
+        tc = (taps.groupby(["meal_date", "dish_name"]).size()
+                  .rename("xin_them").reset_index())
+        d = d.merge(tc, on=["meal_date", "dish_name"], how="left")
+        d["xin_them"] = d["xin_them"].fillna(0).astype(int)
+
+    rows = []
+    for dish, g in d.groupby("dish_name"):
+        rows.append({
+            "dish_name":    dish,
+            "thua":         _wmean(g["thua"], g["n_after"]),
+            "co_anh_truoc": bool(g["co_anh_truoc"].iloc[0]),
+            "xin_them":     int(g["xin_them"].sum()),
+            "tap_rate":     g["xin_them"].sum() / g["mau_so"].sum(),
+            "portion_cv":   g["portion_cv"].mean(),
+            "n_days":       len(g),
+            "n_trays":      int(g["n_after"].sum()),
+            "imputed_days": int((g["before_source"] == "imputed").sum()),
+        })
+    out = pd.DataFrame(rows)
+
+    kq = [tinh_khuyen_nghi(t, r) for t, r in zip(out["thua"], out["tap_rate"])]
+    out["khuyen_nghi"] = [k for k, _ in kq]
+    out["ly_do"] = [l for _, l in kq]
+    return out.sort_values("thua", ascending=False).reset_index(drop=True)
+
+
+# =====================================================================
+# Giao diện
+# =====================================================================
+
+def build_dashboard(start_date: str, end_date: str) -> None:
+    # Lấy dữ liệu MỘT lần cho cả trang
+    logs = prepare(fetch_logs(start_date, end_date))
+    scans = fetch_scans(start_date, end_date)
+    menus = fetch_menus(start_date, end_date)
+    taps = fetch_taps(start_date, end_date)
+    servings = fetch_servings(start_date, end_date)
+    cal = latest_calibration()
+
+    daily = daily_table(logs, scans, menus)
+    if daily.empty:
+        style.empty("Chưa có dữ liệu trong khoảng ngày này",
+                    "Quét khay sau bữa ở trang quét để bắt đầu.")
         return
 
-    cal = latest_calibration()
+    if not taps.empty:
+        taps["dish_name"] = taps["dish_name"].map(normalize_dish)
+    dishes = dish_table(daily, taps, servings, cal)
     mae = cal.get("mae") if cal else None
+    so_khay = scans.loc[scans["phase"] == "after", "scan_id"].nunique()
 
-    show = week.copy()
-    show["shown"] = apply_calibration(show["waste_ratio"], cal)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Số khay đã quét", so_khay)
+    c2.metric("Tỉ lệ bỏ lại trung bình", f"{_wmean(dishes['thua'], dishes['n_trays']):.0%}")
+    c3.metric("Lượt xin thêm", int(dishes["xin_them"].sum()))
 
-    def fmt(v):
-        if pd.isna(v):
-            return "—"
-        return f"{v:.0%} ± {mae:.0%}" if mae is not None else f"{v:.0%}"
+    st.divider()
+    st.subheader("Khuyến nghị điều chỉnh định lượng")
 
-    show["Tỉ lệ bỏ lại"] = show["shown"].map(fmt)
-    show["Độ đều khẩu phần"] = show["portion_cv"].map(
-        lambda v: "—" if pd.isna(v) else ("đều" if v < 0.10 else "chênh lệch")
+    show = dishes.assign(
+        thua_pct=dishes["thua"] * 100,
+        deu=dishes["portion_cv"].map(
+            lambda v: "—" if pd.isna(v) else ("đều" if v < 0.10 else "chênh lệch")),
+        ghi_chu=np.where(dishes["co_anh_truoc"], "",
+                         "Thiếu ảnh trước bữa: tính theo sức chứa ngăn"),
     )
+    cols = ["dish_name", "thua_pct", "xin_them", "khuyen_nghi", "ly_do", "deu", "n_days", "n_trays"]
+    if not dishes["co_anh_truoc"].all():
+        cols.append("ghi_chu")
 
     st.dataframe(
-        show[["dish_name", "Tỉ lệ bỏ lại", "Độ đều khẩu phần", "n_days", "n_trays"]],
-        column_config={"dish_name": "Món", "n_days": "Số ngày", "n_trays": "Số khay"},
+        show[cols],
+        column_config={
+            "dish_name": "Món",
+            "thua_pct": st.column_config.ProgressColumn(
+                f"Tỉ lệ bỏ lại (±{mae:.0%})" if mae is not None else "Tỉ lệ bỏ lại",
+                min_value=0.0, max_value=100.0, format="%.0f%%"),
+            "xin_them": "Lượt xin thêm",
+            "khuyen_nghi": "Khuyến nghị",
+            "ly_do": "Căn cứ",
+            "deu": "Độ đều khẩu phần",
+            "n_days": "Số ngày",
+            "n_trays": "Số khay",
+            "ghi_chu": "Ghi chú",
+        },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
-    if mae is not None:
-        st.caption(
-            f"Đã hiệu chỉnh theo {cal['n']} khay cân thực tế (fit ngày {cal['fit_date']}). "
-            f"±{mae:.0%} là sai số trung bình trên từng khay (MAE). "
-            "Đã trừ phần không ăn được (xương, cọng, vỏ)."
-        )
-    else:
-        st.warning("Chưa hiệu chỉnh với khay cân thực tế — con số chưa có biên sai số.")
-
-    st.caption(
-        "Số ngày = số ngày món có đủ ảnh trước và sau bữa. "
-        "Món chỉ có 1 ngày chỉ nên tham khảo, chưa đủ để kết luận."
-    )
-    if (week["imputed_days"] > 0).any():
-        st.caption("Ngày thiếu ảnh trước bữa được thay bằng trung bình các ngày khác của cùng món.")
+    _chu_thich(daily, dishes, taps, servings, cal, mae, so_khay)
 
     st.subheader("Diễn biến theo ngày")
-    trend = daily.assign(shown=apply_calibration(daily["waste_ratio"], cal))
+    trend = daily.assign(shown=daily_value(daily, cal))
     st.line_chart(trend.pivot(index="meal_date", columns="dish_name", values="shown"))
 
-    _audit_trail(df)
+    _audit_trail(logs)
+
+
+def _chu_thich(daily, dishes, taps, servings, cal, mae, so_khay) -> None:
+    if mae is not None:
+        st.caption(
+            "Tỉ lệ bỏ lại = phần ăn được còn lại so với suất phát ra (đã trừ xương, cọng, vỏ), "
+            f"hiệu chỉnh theo {cal['n']} khay cân thực tế (fit ngày {cal['fit_date']}). "
+            f"±{mae:.0%} là sai số trung bình trên từng khay (MAE)."
+        )
+    else:
+        st.warning("Chưa hiệu chỉnh với khay cân thực tế, con số chưa có biên sai số.")
+
+    st.caption(
+        f"Dựa trên {so_khay} khay. Ngưỡng khuyến nghị hiện là tạm thời. "
+        "Món chỉ có 1 ngày chỉ nên tham khảo, chưa đủ để kết luận."
+    )
+    if (dishes["imputed_days"] > 0).any():
+        st.caption("Ngày thiếu ảnh trước bữa được thay bằng trung bình các ngày khác của cùng món.")
+
+    # Chỉ nhắc những ngày vừa thiếu số suất vừa có lượt xin thêm (ngày khác không ảnh hưởng)
+    co_so_suat = set(servings["meal_date"]) if not servings.empty else set()
+    co_tap = (set(taps.merge(daily[["meal_date", "dish_name"]], on=["meal_date", "dish_name"])["meal_date"])
+              if not taps.empty else set())
+    thieu = sorted(d for d in daily["meal_date"].unique() if d in co_tap and d not in co_so_suat)
+    if thieu:
+        ngay = ", ".join(pd.to_datetime(thieu).strftime("%d/%m"))
+        st.warning(
+            f"Chưa nhập số suất phục vụ ngày {ngay}. Tỉ lệ xin thêm của những ngày này đang chia "
+            "cho số khay đã quét nên có thể bị thổi lên. Nhập số suất ở trang Menu."
+        )
+
 
 def _audit_trail(df: pd.DataFrame) -> None:
     after = df[df["phase"] == "after"]
@@ -262,30 +304,3 @@ def _audit_trail(df: pd.DataFrame) -> None:
                                   caption=f"còn {r['edible_waste']:.0%} ngăn")
             except Exception:
                 cols[i % 3].caption("không tải được ảnh")
-
-def slot_table(df: pd.DataFrame) -> pd.DataFrame:
-    d = df[df["phase"] == "after"].copy()
-    if d.empty:
-        return pd.DataFrame()
-
-    t = pd.to_datetime(d["created_at"], utc=True, format="ISO8601")
-    t = t.dt.tz_convert("Asia/Ho_Chi_Minh")
-    d["minute"] = t.dt.hour * 60 + t.dt.minute
-
-    out = []
-    for _, g in d.groupby("meal_date"):
-        trays = g.drop_duplicates("scan_id")[["scan_id", "minute"]].copy()
-        if len(trays) < 3:
-            continue
-        # rank(method="first") -> giá trị duy nhất -> qcut không vỡ khi nhiều khay trùng phút
-        trays["slot"] = pd.qcut(trays["minute"].rank(method="first"), 3,
-                                labels=["đầu", "giữa", "cuối"])
-        out.append(g.merge(trays[["scan_id", "slot"]], on="scan_id"))
-
-    if not out:
-        return pd.DataFrame()
-
-    allg = pd.concat(out)
-    return (allg.groupby("slot", observed=True)
-                .agg(mean=("edible_waste", "mean"), n_khay=("scan_id", "nunique"))
-                .reset_index())
