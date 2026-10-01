@@ -1,4 +1,3 @@
-# src/nexus/dashboard.py
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -8,8 +7,7 @@ from src.nexus.db import (fetch_logs, fetch_menus, fetch_scans, fetch_servings,
                           fetch_taps, latest_calibration, signed_url)
 from src.nexus.menu import normalize_dish
 
-# Ngưỡng tạm thời, áp lên tỉ lệ bỏ lại so với suất phát ra.
-# Cần hiệu chỉnh lại khi có dữ liệu thật.
+# Ngưỡng tạm thời, áp lên tỉ lệ bỏ lại so với suất phát ra. Cần hiệu chỉnh lại khi có dữ liệu thật.
 NGUONG_GIAM = 0.30
 NGUONG_TANG = 0.15
 TAP_CAO = 0.15
@@ -24,15 +22,9 @@ def tinh_khuyen_nghi(waste: float, tap_rate: float) -> tuple[str, str]:
         return "Tăng định lượng", "Ăn gần hết và nhiều người xin thêm — suất đang thiếu"
     return "Giữ nguyên", "Trong ngưỡng hợp lý"
 
-
-# =====================================================================
-# Xử lý dữ liệu (calibration.py cũng dùng prepare và daily_table)
-# =====================================================================
-
 def prepare(logs: pd.DataFrame) -> pd.DataFrame:
     df = logs.copy()
     if df.empty:
-        # Giữ đủ cột: ngày mà mọi khay đều ăn sạch vẫn phải tính được 0%
         return pd.DataFrame(columns=["scan_id", "image_url", "dish_name", "fill_fraction",
                                      "inedible_ratio", "meal_date", "phase", "edible_waste"])
 
@@ -49,9 +41,6 @@ def prepare(logs: pd.DataFrame) -> pd.DataFrame:
 
 
 def _served(df: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
-    """(ngày, món) được phục vụ.
-    Ngày có thực đơn -> lấy đúng thực đơn ("khác" tự động bị loại).
-    Ngày cũ, trước khi có trang Menu -> suy từ món xuất hiện trong ảnh như trước."""
     inferred = df[["meal_date", "dish_name"]].drop_duplicates()
     if menus.empty:
         return inferred
@@ -61,8 +50,6 @@ def _served(df: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
 
 
 def per_day_dish(df: pd.DataFrame, scans: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
-    """Mỗi (ngày, món) được phục vụ -> tổng thừa / số khay sau bữa hôm đó.
-    Món được phục vụ mà không có trên khay = ăn sạch (0)."""
     if scans.empty:
         return pd.DataFrame(columns=["meal_date", "dish_name", "waste_sum", "n_trays", "mean_after"])
     n_trays = (scans[scans["phase"] == "after"]
@@ -80,7 +67,6 @@ def per_day_dish(df: pd.DataFrame, scans: pd.DataFrame, menus: pd.DataFrame) -> 
 
 
 def daily_table(df: pd.DataFrame, scans: pd.DataFrame, menus: pd.DataFrame) -> pd.DataFrame:
-    """Mỗi (ngày, món): thừa sau bữa, lượng phát ra trước bữa, và tỉ lệ bỏ lại = sau / trước."""
     after = per_day_dish(df, scans, menus).rename(columns={"n_trays": "n_after"})
     if after.empty:
         return pd.DataFrame()
@@ -122,14 +108,10 @@ def apply_calibration(ratio: pd.Series, cal: dict | None) -> pd.Series:
 
 
 def _co_anh_truoc(daily: pd.DataFrame) -> pd.Series:
-    """True cho mọi dòng của món có ít nhất 1 ngày tính được tỉ lệ so với suất phát."""
     return daily.groupby("dish_name")["waste_ratio"].transform(lambda s: s.notna().any())
 
 
 def daily_value(daily: pd.DataFrame, cal: dict | None) -> pd.Series:
-    """CON SỐ DUY NHẤT hiển thị cho mỗi (ngày, món):
-    - có ảnh trước bữa -> tỉ lệ bỏ lại so với suất phát, đã hiệu chỉnh (nếu có hệ số)
-    - không có         -> phần còn lại so với sức chứa ngăn (chưa hiệu chỉnh được)"""
     return pd.Series(
         np.where(_co_anh_truoc(daily), apply_calibration(daily["waste_ratio"], cal), daily["mean_after"]),
         index=daily.index,
@@ -138,7 +120,6 @@ def daily_value(daily: pd.DataFrame, cal: dict | None) -> pd.Series:
 
 def dish_table(daily: pd.DataFrame, taps: pd.DataFrame,
                servings: pd.DataFrame, cal: dict | None) -> pd.DataFrame:
-    """Một dòng mỗi món trong khoảng ngày, kèm khuyến nghị."""
     if daily.empty:
         return pd.DataFrame()
 
@@ -146,16 +127,12 @@ def dish_table(daily: pd.DataFrame, taps: pd.DataFrame,
     d["thua"] = daily_value(d, cal)
     d["co_anh_truoc"] = _co_anh_truoc(d)
 
-    # Mẫu số của tỉ lệ xin thêm = số suất bếp phát ra, KHÔNG phải số khay đã quét.
-    # Lượt xin thêm đến từ cả căng tin, còn khay chỉ quét một phần.
     if servings.empty:
         d["n_served"] = np.nan
     else:
         d = d.merge(servings[["meal_date", "n_served"]], on="meal_date", how="left")
-    # Chưa nhập số suất -> tạm dùng số khay. Nhập nhầm nhỏ hơn số khay đã quét -> lấy số khay.
     d["mau_so"] = np.fmax(d["n_served"].astype(float), d["n_after"].astype(float))
 
-    # Chỉ đếm lượt xin thêm của đúng (ngày, món) có trong bảng, để tử và mẫu cùng phạm vi
     if taps.empty:
         d["xin_them"] = 0
     else:
@@ -185,12 +162,9 @@ def dish_table(daily: pd.DataFrame, taps: pd.DataFrame,
     return out.sort_values("thua", ascending=False).reset_index(drop=True)
 
 
-# =====================================================================
-# Giao diện
-# =====================================================================
+# Interfafce for dashboard page
 
 def build_dashboard(start_date: str, end_date: str) -> None:
-    # Lấy dữ liệu MỘT lần cho cả trang
     logs = prepare(fetch_logs(start_date, end_date))
     scans = fetch_scans(start_date, end_date)
     menus = fetch_menus(start_date, end_date)
@@ -274,7 +248,6 @@ def _chu_thich(daily, dishes, taps, servings, cal, mae, so_khay) -> None:
     if (dishes["imputed_days"] > 0).any():
         st.caption("Ngày thiếu ảnh trước bữa được thay bằng trung bình các ngày khác của cùng món.")
 
-    # Chỉ nhắc những ngày vừa thiếu số suất vừa có lượt xin thêm (ngày khác không ảnh hưởng)
     co_so_suat = set(servings["meal_date"]) if not servings.empty else set()
     co_tap = (set(taps.merge(daily[["meal_date", "dish_name"]], on=["meal_date", "dish_name"])["meal_date"])
               if not taps.empty else set())

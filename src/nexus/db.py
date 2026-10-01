@@ -118,9 +118,8 @@ def latest_calibration(scope: str = "global") -> dict | None:
     )
     return res.data[0] if res.data else None
 
-# ===== THỰC ĐƠN =====
+# get the menu for a specific date
 def fetch_menu(meal_date: str) -> list[str]:
-    """Thực đơn 1 ngày, giữ đúng thứ tự bếp nhập."""
     res = (get_client().table("menus").select("dish_name")
            .eq("meal_date", meal_date).order("id").execute())
     return [r["dish_name"] for r in (res.data or [])]
@@ -131,12 +130,11 @@ def fetch_menus(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def fetch_known_dishes() -> list[str]:
-    """Mọi tên món từng có trong thực đơn, để gợi ý khi nhập (chống mỗi tuần gõ một kiểu)."""
     res = (get_client().table("menus").select("dish_name")
            .order("id", desc=True).limit(1000).execute())
     return sorted({r["dish_name"] for r in (res.data or [])})
 
-
+# save menu for a specific date
 def save_menu(meal_date: str, dishes: list[str]) -> list[str]:
     """Ghi thực đơn 1 ngày, thay bản cũ. Trả về list tên đã chuẩn hoá."""
     clean = list(dict.fromkeys(normalize_dish(d) for d in dishes))
@@ -153,7 +151,7 @@ def save_menu(meal_date: str, dishes: list[str]) -> list[str]:
          .eq("meal_date", meal_date).eq("dish_name", d).execute())
     return clean
 
-# ===== SỐ SUẤT PHỤC VỤ =====
+# number of servings for a specific date
 def fetch_servings(start_date: str, end_date: str) -> pd.DataFrame:
     return _select_all("servings", start_date, end_date)
 

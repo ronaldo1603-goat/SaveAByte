@@ -11,11 +11,10 @@ from src.nexus.db import upload_tray_image, save_scan, fetch_menu
 from src.nexus.menu import OTHER
 from src.nexus.clock import today_vn
 
-MAX_SIDE = 1536   # px, cạnh dài sau khi thu nhỏ
+MAX_SIDE = 1536
 
 
 def chuan_hoa_anh(raw: bytes) -> bytes:
-    """Xoay đúng chiều theo EXIF, thu cạnh dài về MAX_SIDE, lưu lại thành JPEG."""
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw)))
     img = img.convert("RGB")
     img.thumbnail((MAX_SIDE, MAX_SIDE))
@@ -30,7 +29,6 @@ def het_quota(e: Exception) -> bool:
 
 
 def bao_loi(tieu_de: str, goi_y: str, e: Exception) -> None:
-    """Thay traceback đỏ bằng thông báo dễ hiểu; chi tiết kỹ thuật vẫn xem được."""
     style.empty(tieu_de, goi_y)
     with st.expander("Chi tiết kỹ thuật"):
         st.code(f"{type(e).__name__}: {e}")

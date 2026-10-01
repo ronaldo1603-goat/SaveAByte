@@ -41,7 +41,7 @@ Chỉ báo những ngăn bạn thực sự nhìn thấy. Món có trong thực �
 def _schema(menu: list[str]) -> dict:
     """Schema của TrayAnalysis, nhưng dish_name bị khoá vào thực đơn + "khác"."""
     s = copy.deepcopy(TrayAnalysis.model_json_schema())
-    s["$defs"]["Compartment"]["properties"]["dish_name"]["enum"] = [*menu, OTHER]
+    s["$defs"]["Compartment"]["properties"]["dish_name"]["enum"] = [*menu, OTHER] # bắt buộc các món ăn phải theo menu hoặc other
     return s
 
 
@@ -65,7 +65,6 @@ def read_tray(image_bytes: bytes, menu: list[str], mime: str = "image/jpeg") -> 
     )
     analysis = TrayAnalysis.model_validate_json(interaction.output_text)
 
-    # Lưới an toàn: schema đã ép enum, nhưng vẫn kiểm lại ở phía mình
     allowed = set(menu)
     for c in analysis.compartments:
         name = normalize_dish(c.dish_name)
