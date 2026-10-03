@@ -65,8 +65,6 @@ rows = []
 for i in range(7):
     d = monday + timedelta(days=i)
     dishes = by_day.get(d.isoformat(), [])
-    if i >= 5 and not dishes:
-        continue   # cuối tuần không có thực đơn thì ẩn
     rows.append({"Ngày": f"{THU[i]} {d:%d/%m}",
                  "Món": ", ".join(dishes) if dishes else "chưa nhập",
                  "Số suất": str(suat_by_day.get(d.isoformat(), "—"))})
