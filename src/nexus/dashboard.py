@@ -11,11 +11,14 @@ from src.nexus.menu import normalize_dish
 NGUONG_GIAM = 0.30
 NGUONG_TANG = 0.15
 TAP_CAO = 0.15
+NGUONG_CHE_BIEN = 0.50   # tạm thời, chưa hiệu chỉnh
 
 
 def tinh_khuyen_nghi(waste: float, tap_rate: float) -> tuple[str, str]:
     if waste >= NGUONG_GIAM and tap_rate >= TAP_CAO:
-        return "Cần xem xét", "Vừa bỏ nhiều vừa xin thêm nhiều — khẩu vị chia rẽ, không phải vấn đề định lượng"
+        return "Xem lại cách chế biến", "Vừa bỏ nhiều vừa xin thêm nhiều — khẩu vị chia rẽ, không phải vấn đề định lượng"
+    if waste >= NGUONG_CHE_BIEN:
+        return "Thử đổi cách chế biến", "Bỏ lại hơn nửa, ít người xin thêm — giảm định lượng không đủ giải quyết"
     if waste >= NGUONG_GIAM:
         return f"Giảm ~{int(waste * 100 * 0.5)}%", "Tỉ lệ thừa cao, ít người xin thêm"
     if waste < NGUONG_TANG and tap_rate >= TAP_CAO:
